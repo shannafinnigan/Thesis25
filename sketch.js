@@ -1,4 +1,4 @@
-// Hand Pose Painting with ml5.js – pinch spawns colored dot bursts with palette
+// Hand Pose Painting with ml5.js – responsive, pinch spawns colored dot bursts
 
 let video;
 let handPose;
@@ -16,30 +16,33 @@ let dots = [];
 let buttons = [];
 let currentColor; // [r,g,b]
 
+// UI buttons
+let restartButton;
+let saveButton;
+
 // backend
 ml5.setBackend("webgl");
 
 function preload() {
-  // Use UNFLIPPED coords; we handle mirroring in draw()
+  // Unflipped coords; we handle mirroring in draw()
   handPose = ml5.handPose({ flipped: false });
 }
 
 function setup() {
-  // Taller canvas to make room for the small video preview + palette
-  createCanvas(640, 560);
+  // Full-window canvas
+  createCanvas(windowWidth, windowHeight);
 
-  // Off-screen drawing buffer (logical space: 320x240 like the video)
+  // Logical drawing buffer & video (fixed resolution; we scale it)
   painting = createGraphics(320, 240);
   painting.clear();
 
-  // Capture video
   video = createCapture(VIDEO);
   video.size(320, 240);
   video.hide();
 
   frameRate(60);
 
-  // Set up color buttons (positions, colors, labels)
+  // Color buttons (colors + labels; positions computed per frame)
   let labels = ["Red", "Green", "Yellow", "Blue"];
   let colors = [
     [228, 93, 51],   // red
@@ -48,30 +51,31 @@ function setup() {
     [71, 165, 231]   // blue
   ];
 
-  let startX = 140;
-  let spacing = 120;
-  let y = 505;
-  let outerR = 40;
-  let innerR = 32;
-
   for (let i = 0; i < labels.length; i++) {
     buttons.push({
-      x: startX + i * spacing,
-      y: y,
-      outerR: outerR,
-      innerR: innerR,
+      x: 0, y: 0,               // layout computed later
+      outerR: 40,
+      innerR: 32,
       color: colors[i],
       label: labels[i]
     });
   }
 
-  // Default drawing color = red
-  currentColor = colors[0];
+  currentColor = colors[0]; // default = red
+
+  // Basic config for restart / save buttons (positions updated in layout)
+  restartButton = { x: 0, y: 0, w: 110, h: 36, label: "Restart" };
+  saveButton    = { x: 0, y: 0, w: 110, h: 36, label: "Save" };
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
 }
 
 function mousePressed() {
   console.log(hands);
   handleColorClick(mouseX, mouseY);
+  handleControlButtonsClick(mouseX, mouseY);
 }
 
 function gotHands(results) {
@@ -80,8 +84,12 @@ function gotHands(results) {
 }
 
 function draw() {
-  // Plain background for the drawing area
-  background(248, 243, 233); // beige
+  // Height reserved for UI (palette + preview) at bottom
+  const uiBandHeight = 170;
+  const drawH = height - uiBandHeight;
+
+  // Beige background across whole canvas
+  background(248, 243, 233);
 
   // --- HAND TRACKING ---
   if (!detecting && frameCount % 2 === 0) {
@@ -101,11 +109,9 @@ function draw() {
     let index = hand.keypoints[8];
 
     if (thumb && index) {
-      // Midpoint between thumb and index
       let x = (index.x + thumb.x) * 0.5;
       let y = (index.y + thumb.y) * 0.5;
 
-      // Distance between thumb & index
       let d = dist(index.x, index.y, thumb.x, thumb.y);
       debugX = x;
       debugY = y;
@@ -115,7 +121,7 @@ function draw() {
         isPinching = true;
 
         // RANDOMIZED TIMING: only sometimes spawn a burst per frame
-        let spawnChance = 0.15; // 0–1, higher = more frequent
+        let spawnChance = 0.15;
         if (random(1) < spawnChance) {
           spawnBurst(x, y, d, minDist, pinchThreshold);
         }
@@ -139,61 +145,70 @@ function draw() {
         let swPreview = map(debugD, minDist, pinchThreshold, 20, 3, true);
         circle(debugX, debugY, swPreview * 1.5);
       }
-
       pop();
     }
   }
 
   wasPinching = isPinching;
 
-  // --- UPDATE & DRAW DOTS (with fade in/out and persistent traces) ---
+  // --- UPDATE & DRAW DOTS ON OFFSCREEN BUFFER ---
   updateAndDrawDots();
 
-  // --- MIRRORED PAINTING OVERLAY (top of drawing space) ---
+  // --- MIRRORED PAINTING OVERLAY (fills drawing area) ---
   push();
   translate(width, 0);
   scale(-1, 1);
-  image(painting, 0, 0, 640, 480); // scale 320x240 buffer to canvas
+  image(painting, 0, 0, width, drawH);
   pop();
 
   // -----------------------------------------------------
-  // SMALL MIRRORED VIDEO PREVIEW BELOW THE DRAWING CANVAS
+  // SMALL MIRRORED VIDEO PREVIEW – sticky bottom-right
   // -----------------------------------------------------
-  let previewW = 130;
-  let previewH = 100;
-  let previewX = width - previewW - 20;
-  let previewY = 490;
+  let margin = 20;
+  let previewW = min(width * 0.22, 220);
+  let previewH = previewW * (video.height / video.width);
+  let previewX = width - previewW - margin;
+  let previewY = height - previewH - margin - 40; // nudge up a bit for Save button
 
   push();
   translate(previewX + previewW, previewY);
-  scale(-1, 1);                  // flip horizontally (selfie-style)
+  scale(-1, 1);
   image(video, 0, 0, previewW, previewH);
   pop();
 
   fill(50);
   textSize(14);
   textAlign(LEFT, TOP);
-  text("Camera Preview", previewX, previewY + previewH + 8);
+  text("Camera Preview", previewX, previewY - 18);
 
   // -----------------------------------------------------
-  // COLOR PALETTE UI
+  // COLOR PALETTE – sticky bottom-center
   // -----------------------------------------------------
-  drawColorPalette();
+  drawColorPalette(uiBandHeight);
+
+  // -----------------------------------------------------
+  // RESTART + SAVE BUTTONS – bottom-left & bottom-right
+  // -----------------------------------------------------
+  layoutControlButtons();
+  drawControlButtons();
 }
 
 // -----------------------------------------------------
-// COLOR PALETTE: draw title + buttons
+// LAYOUT BUTTONS + DRAW PALETTE
 // -----------------------------------------------------
-function drawColorPalette() {
-  // Title
+function drawColorPalette(uiBandHeight) {
+  layoutButtons(); // recompute positions based on current width/height
+
+  // Title above buttons
   textAlign(CENTER, CENTER);
   fill(0);
   textSize(32);
-  text("Change Color:", width / 2, 475);
+  const titleY = height - uiBandHeight + 28;
+  text("Change Color:", width / 2, titleY);
 
   // Buttons
   for (let b of buttons) {
-    // Outer white circle + soft shadow
+    // Outer white circle + shadow
     noStroke();
     fill(255);
     drawingContext.shadowBlur = 8;
@@ -207,11 +222,11 @@ function drawColorPalette() {
 
     // Label
     fill(0);
-    textSize(24);
+    textSize(20);
     textAlign(CENTER, TOP);
-    text(b.label, b.x, b.y + b.outerR + 10);
+    text(b.label, b.x, b.y + b.outerR + 8);
 
-    // Optional selection ring
+    // Selection ring
     if (
       currentColor[0] === b.color[0] &&
       currentColor[1] === b.color[1] &&
@@ -225,14 +240,96 @@ function drawColorPalette() {
   }
 }
 
+// Compute color-button positions responsively
+function layoutButtons() {
+  const paletteY = height - 80; // center of buttons row
+  const baseOuterR = 40;
+  const scaleFactor = constrain(width / 800, 0.7, 1.1);
+  const outerR = baseOuterR * scaleFactor;
+  const innerR = outerR * 0.8;
+
+  const spacing = min(160 * scaleFactor, width / 5);
+  const startX = width / 2 - (1.5 * spacing); // 4 buttons
+
+  for (let i = 0; i < buttons.length; i++) {
+    buttons[i].x = startX + i * spacing;
+    buttons[i].y = paletteY;
+    buttons[i].outerR = outerR;
+    buttons[i].innerR = innerR;
+  }
+}
+
+// -----------------------------------------------------
+// CONTROL BUTTONS (Restart / Save)
+// -----------------------------------------------------
+function layoutControlButtons() {
+  const y = height - 50; // vertical position near bottom
+
+  restartButton.x = 20;
+  restartButton.y = y;
+
+  saveButton.x = width - saveButton.w - 20;
+  saveButton.y = y;
+}
+
+function drawControlButtons() {
+  textAlign(CENTER, CENTER);
+  textSize(16);
+
+  // Restart
+  drawPillButton(restartButton.x, restartButton.y, restartButton.w, restartButton.h, "Restart");
+
+  // Save
+  drawPillButton(saveButton.x, saveButton.y, saveButton.w, saveButton.h, "Save");
+}
+
+function drawPillButton(x, y, w, h, label) {
+  const r = h / 2;
+  noStroke();
+  fill(255);
+  drawingContext.shadowBlur = 6;
+  drawingContext.shadowColor = "rgba(0,0,0,0.25)";
+  rect(x, y, w, h, r);
+  drawingContext.shadowBlur = 0;
+
+  fill(40);
+  text(label, x + w / 2, y + h / 2 + 1);
+}
+
+function handleControlButtonsClick(mx, my) {
+  // Restart
+  if (
+    mx >= restartButton.x &&
+    mx <= restartButton.x + restartButton.w &&
+    my >= restartButton.y &&
+    my <= restartButton.y + restartButton.h
+  ) {
+    // Clear all dots & canvas
+    dots = [];
+    painting.clear();
+    return;
+  }
+
+  // Save (mock – just log for now)
+  if (
+    mx >= saveButton.x &&
+    mx <= saveButton.x + saveButton.w &&
+    my >= saveButton.y &&
+    my <= saveButton.y + saveButton.h
+  ) {
+    console.log("Save button clicked (mock)");
+  }
+}
+
 // -----------------------------------------------------
 // HANDLE CLICK ON COLOR BUTTONS
 // -----------------------------------------------------
 function handleColorClick(mx, my) {
+  layoutButtons(); // make sure positions match current layout
   for (let b of buttons) {
     let d = dist(mx, my, b.x, b.y);
     if (d < b.outerR) {
-      currentColor = b.color; // New dots will use this color
+      currentColor = b.color;
       break;
     }
   }
@@ -242,12 +339,10 @@ function handleColorClick(mx, my) {
 // SPAWN A BURST OF DOTS NEAR A PINCH POSITION
 // -----------------------------------------------------
 function spawnBurst(x, y, d, minDist, pinchThreshold) {
-  let numDots = int(random(6, 16)); // random number of dots in this burst
+  let numDots = int(random(6, 16));
 
   for (let i = 0; i < numDots; i++) {
     let angle = random(TWO_PI);
-
-    // Spread radius depends slightly on pinch distance
     let maxSpread = map(d, minDist, pinchThreshold, 8, 30, true);
     let spread = random(0, maxSpread);
 
@@ -255,8 +350,6 @@ function spawnBurst(x, y, d, minDist, pinchThreshold) {
     let cy = y + sin(angle) * spread;
 
     let r = random(4, 18);
-
-    // 70% chance this dot is persistent
     let persistent = random(1) < 0.7;
 
     dots.push({
@@ -266,9 +359,9 @@ function spawnBurst(x, y, d, minDist, pinchThreshold) {
       alpha: 0,
       maxAlpha: random(140, 230),
       age: 0,
-      life: persistent ? null : random(40, 80), // only used for non-persistent
+      life: persistent ? null : random(40, 80),
       persistent: persistent,
-      color: {            // store the color this dot was born with
+      color: {
         r: currentColor[0],
         g: currentColor[1],
         b: currentColor[2]
@@ -279,47 +372,49 @@ function spawnBurst(x, y, d, minDist, pinchThreshold) {
 
 // -----------------------------------------------------
 // UPDATE & DRAW ALL DOTS WITH FADE IN / FADE OUT
+// NEW: newer dots are drawn on top of older ones
 // -----------------------------------------------------
 function updateAndDrawDots() {
   painting.clear();
 
-  for (let i = dots.length - 1; i >= 0; i--) {
+  // First pass: update + keep survivors in order
+  let newDots = [];
+  for (let i = 0; i < dots.length; i++) {
     let dot = dots[i];
-
     dot.age++;
 
     if (dot.persistent) {
-      // Persistent dots fade IN then stay
       if (dot.alpha < dot.maxAlpha) {
         dot.alpha = min(dot.maxAlpha, dot.alpha + 10);
       }
-      // Never removed; they keep being drawn
+      // persistent never removed
+      newDots.push(dot);
     } else {
-      // Non-persistent dots: fade in, hold, then fade out
       let life = dot.life;
       let fadeInFrames = life * 0.3;
       let fadeOutStart = life * 0.7;
 
       if (dot.age <= fadeInFrames) {
-        // Fade in
         let t = dot.age / fadeInFrames;
         dot.alpha = lerp(0, dot.maxAlpha, t);
       } else if (dot.age > fadeOutStart) {
-        // Fade out
         let t = (dot.age - fadeOutStart) / (life - fadeOutStart);
         dot.alpha = lerp(dot.maxAlpha, 0, t);
       } else {
-        // Fully visible in the middle
         dot.alpha = dot.maxAlpha;
       }
 
-      if (dot.age > life || dot.alpha <= 0) {
-        dots.splice(i, 1);
-        continue;
+      if (!(dot.age > life || dot.alpha <= 0)) {
+        newDots.push(dot);
       }
     }
+  }
 
-    // Draw to the off-screen buffer in the dot's own color
+  // Replace with survivors
+  dots = newDots;
+
+  // Second pass: draw in order so newer ones (later in array) end up on top
+  for (let dot of dots) {
     painting.noStroke();
     painting.fill(dot.color.r, dot.color.g, dot.color.b, dot.alpha);
     painting.circle(dot.x, dot.y, dot.r);
